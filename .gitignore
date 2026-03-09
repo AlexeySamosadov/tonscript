@@ -1,0 +1,4 @@
+node_modules/
+dist/
+*.boc
+.testnet-deploy-results.json
