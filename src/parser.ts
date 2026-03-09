@@ -582,12 +582,32 @@ export class Parser {
         }
         this.expect(TokenKind.RParen);
         expr = { kind: "CallExpr", callee: expr.name, args, pos };
-      } else if (this.at(TokenKind.Dot) && expr.kind === "Ident") {
+      } else if (this.at(TokenKind.Dot)) {
+        const pos = this.pos_();
         this.advance();
         const field = this.expect(TokenKind.Ident).value;
-        // "this.field" is handled in parsePrimary, so if we get here
-        // the object is NOT "this" — generate MemberExpr
-        expr = { kind: "MemberExpr", object: expr.name, field, pos: expr.pos };
+        if (this.at(TokenKind.LParen)) {
+          // Method call: expr.method(args)
+          this.advance(); // consume '('
+          const args: AST.Expr[] = [];
+          if (!this.at(TokenKind.RParen)) {
+            args.push(this.parseExpr());
+            while (this.match(TokenKind.Comma)) {
+              args.push(this.parseExpr());
+            }
+          }
+          this.expect(TokenKind.RParen);
+          expr = { kind: "MethodCallExpr", object: expr, method: field, args, pos };
+        } else if (expr.kind === "Ident") {
+          // Field access: ident.field (not followed by '(')
+          expr = { kind: "MemberExpr", object: expr.name, field, pos: expr.pos };
+        } else {
+          // Field access on non-ident expression — wrap as MemberExpr is not possible
+          // since MemberExpr.object is a string. Use MethodCallExpr with no args won't work.
+          // For now, treat as a no-arg method call (getter-style).
+          // This handles patterns like `expr.field` where expr is not a simple ident.
+          expr = { kind: "MethodCallExpr", object: expr, method: field, args: [], pos };
+        }
       } else {
         break;
       }

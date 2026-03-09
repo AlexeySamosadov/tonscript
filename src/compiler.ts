@@ -23,14 +23,14 @@ export type CompileResult = {
   };
 };
 
-export function compile(source: string): CompileResult {
+export function compile(source: string, contractName?: string): CompileResult {
   // 1. Parse
   const parser = new Parser(source);
   const ast = parser.parse();
 
-  // 2. Codegen
+  // 2. Codegen (optionally targeting a specific contract by name)
   const codegen = new CodeGenerator();
-  const instructions = codegen.generate(ast);
+  const instructions = codegen.generate(ast, contractName);
 
   // 3. Generate readable assembly
   const asmParts: string[] = [];
@@ -71,6 +71,29 @@ export function compile(source: string): CompileResult {
   }
 
   return { ast, asm, instructions, binary };
+}
+
+export function compileAll(source: string): Map<string, CompileResult> {
+  // 1. Parse once
+  const parser = new Parser(source);
+  const ast = parser.parse();
+
+  // 2. Collect all contract names
+  const contractNames = ast.declarations
+    .filter(d => d.kind === "ContractDecl")
+    .map(d => d.name);
+
+  if (contractNames.length === 0) {
+    throw new Error("No contracts found");
+  }
+
+  // 3. Compile each contract by name
+  const results = new Map<string, CompileResult>();
+  for (const name of contractNames) {
+    results.set(name, compile(source, name));
+  }
+
+  return results;
 }
 
 export function compileToAsm(source: string): string {

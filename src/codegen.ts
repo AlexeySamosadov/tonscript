@@ -23,22 +23,30 @@ export class CodeGenerator {
   private messages: Map<string, AST.MessageDecl> = new Map();
   private storageFields: StorageField[] = [];
 
-  generate(program: AST.Program): {
+  generate(program: AST.Program, contractName?: string): {
     recvInternal: TVMInst[];
     getters: { name: string; id: number; code: TVMInst[] }[];
     stateInit: TVMInst[];
     asmFull: TVMInst[];
   } {
-    // Collect messages
+    // Collect messages (shared across all contracts)
     for (const decl of program.declarations) {
       if (decl.kind === "MessageDecl") {
         this.messages.set(decl.name, decl);
       }
     }
 
-    // Find contract
-    const contract = program.declarations.find(d => d.kind === "ContractDecl") as AST.ContractDecl;
-    if (!contract) throw new Error("No contract found");
+    // Find contract by name, or first contract if no name given
+    let contract: AST.ContractDecl | undefined;
+    if (contractName) {
+      contract = program.declarations.find(
+        d => d.kind === "ContractDecl" && d.name === contractName
+      ) as AST.ContractDecl | undefined;
+      if (!contract) throw new Error(`Contract "${contractName}" not found`);
+    } else {
+      contract = program.declarations.find(d => d.kind === "ContractDecl") as AST.ContractDecl | undefined;
+      if (!contract) throw new Error("No contract found");
+    }
     this.contract = contract;
 
     // Build storage layout
@@ -594,6 +602,9 @@ export class CodeGenerator {
       case "CallExpr":
         return this.genCallExpr(expr, ctx);
 
+      case "MethodCallExpr":
+        return this.genMethodCallExpr(expr, ctx);
+
       default:
         ctx.stackDepth++;
         return [
@@ -791,8 +802,184 @@ export class CodeGenerator {
         return insts;
       }
 
+      case "beginCell": {
+        ctx.stackDepth++;
+        insts.push({ op: "NEWC" });
+        return insts;
+      }
+
+      case "emptyCell": {
+        ctx.stackDepth++;
+        insts.push({ op: "NEWC" });
+        insts.push({ op: "ENDC" });
+        return insts;
+      }
+
       default:
         throw new Error(`Unknown function: ${expr.callee}`);
+    }
+  }
+
+  private genMethodCallExpr(expr: AST.MethodCallExpr, ctx: CodegenContext): TVMInst[] {
+    const insts: TVMInst[] = [];
+
+    switch (expr.method) {
+      // ── Builder methods ──────────────────────────────────
+      case "storeUint": {
+        // .storeUint(value, bits) → STU bits
+        // Stack before: [...], genExpr(object) pushes builder → [..., builder]
+        // genExpr(value) pushes value → [..., builder, value]
+        // STU expects: value(s1) builder(s0) → builder'(s0)
+        // So we need SWAP before STU
+        insts.push(...this.genExpr(expr.object, ctx));  // builder on stack
+        insts.push(...this.genExpr(expr.args[0], ctx)); // value on stack
+        const bitsU = expr.args[1];
+        if (bitsU.kind !== "NumberLit") throw new Error("storeUint bits must be a literal");
+        insts.push({ op: "XCHG", i: 1 }); // swap value and builder
+        insts.push({ op: "STU", bits: Number(bitsU.value) });
+        ctx.stackDepth--; // consumes value, builder remains as builder'
+        return insts;
+      }
+
+      case "storeInt": {
+        // .storeInt(value, bits) → STI bits
+        insts.push(...this.genExpr(expr.object, ctx));
+        insts.push(...this.genExpr(expr.args[0], ctx));
+        const bitsI = expr.args[1];
+        if (bitsI.kind !== "NumberLit") throw new Error("storeInt bits must be a literal");
+        insts.push({ op: "XCHG", i: 1 });
+        insts.push({ op: "STI", bits: Number(bitsI.value) });
+        ctx.stackDepth--;
+        return insts;
+      }
+
+      case "storeCoins": {
+        // .storeCoins(value) → STVARUINT16
+        insts.push(...this.genExpr(expr.object, ctx));
+        insts.push(...this.genExpr(expr.args[0], ctx));
+        insts.push({ op: "STVARUINT16" });
+        ctx.stackDepth--;
+        return insts;
+      }
+
+      case "storeRef": {
+        // .storeRef(cell) → STREF
+        // STREF: builder cell → builder' (stores cell as ref)
+        insts.push(...this.genExpr(expr.object, ctx));  // builder
+        insts.push(...this.genExpr(expr.args[0], ctx)); // cell
+        insts.push({ op: "XCHG", i: 1 }); // swap so builder is on top
+        insts.push({ op: "STREF" });
+        ctx.stackDepth--;
+        return insts;
+      }
+
+      case "storeSlice": {
+        // .storeSlice(slice) → STSLICER
+        insts.push(...this.genExpr(expr.object, ctx));
+        insts.push(...this.genExpr(expr.args[0], ctx));
+        insts.push({ op: "STSLICER" });
+        ctx.stackDepth--;
+        return insts;
+      }
+
+      case "storeAddress": {
+        // .storeAddress(addr) → STSLICER (address is stored as slice)
+        insts.push(...this.genExpr(expr.object, ctx));
+        insts.push(...this.genExpr(expr.args[0], ctx));
+        insts.push({ op: "STSLICER" });
+        ctx.stackDepth--;
+        return insts;
+      }
+
+      case "endCell": {
+        // .endCell() → ENDC (builder → cell)
+        insts.push(...this.genExpr(expr.object, ctx));
+        insts.push({ op: "ENDC" });
+        // stackDepth unchanged: consumes builder, produces cell
+        return insts;
+      }
+
+      // ── Cell methods ─────────────────────────────────────
+      case "beginParse": {
+        // .beginParse() → CTOS (cell → slice)
+        insts.push(...this.genExpr(expr.object, ctx));
+        insts.push({ op: "CTOS" });
+        // stackDepth unchanged: consumes cell, produces slice
+        return insts;
+      }
+
+      case "hash": {
+        // .hash() → HASHCU (cell → uint256)
+        insts.push(...this.genExpr(expr.object, ctx));
+        insts.push({ op: "HASHCU" });
+        return insts;
+      }
+
+      // ── Slice methods ────────────────────────────────────
+      case "loadUint": {
+        // .loadUint(bits) → LDU bits (slice → value slice')
+        // Returns the value; the remaining slice is dropped
+        insts.push(...this.genExpr(expr.object, ctx));
+        const bitsLU = expr.args[0];
+        if (bitsLU.kind !== "NumberLit") throw new Error("loadUint bits must be a literal");
+        insts.push({ op: "LDU", bits: Number(bitsLU.value) });
+        ctx.stackDepth++; // LDU: slice → value slice' (+1)
+        // Swap to get value on top, then drop remaining slice
+        insts.push({ op: "POP", i: 1 }); // drop remaining slice (s1, under value at s0)
+        ctx.stackDepth--;
+        // Net: object consumed, value produced = same as before + 0, but we started
+        // by pushing object (+1 from genExpr), then LDU gives +1, POP gives -1
+        // Total: genExpr pushed 1, net from LDU+POP = 0, so stackDepth = before + 1
+        return insts;
+      }
+
+      case "loadInt": {
+        // .loadInt(bits) → LDI bits
+        insts.push(...this.genExpr(expr.object, ctx));
+        const bitsLI = expr.args[0];
+        if (bitsLI.kind !== "NumberLit") throw new Error("loadInt bits must be a literal");
+        insts.push({ op: "LDI", bits: Number(bitsLI.value) });
+        ctx.stackDepth++;
+        insts.push({ op: "POP", i: 1 });
+        ctx.stackDepth--;
+        return insts;
+      }
+
+      case "loadCoins": {
+        // .loadCoins() → LDVARUINT16
+        insts.push(...this.genExpr(expr.object, ctx));
+        insts.push({ op: "LDVARUINT16" });
+        ctx.stackDepth++;
+        insts.push({ op: "POP", i: 1 });
+        ctx.stackDepth--;
+        return insts;
+      }
+
+      case "loadRef": {
+        // .loadRef() → LDREF (slice → cell slice')
+        insts.push(...this.genExpr(expr.object, ctx));
+        insts.push({ op: "LDREF" });
+        ctx.stackDepth++;
+        insts.push({ op: "POP", i: 1 });
+        ctx.stackDepth--;
+        return insts;
+      }
+
+      case "loadAddress": {
+        // .loadAddress() → load 267-bit slice (MsgAddressInt)
+        // LDSLICE 267 would work but is non-standard width
+        // Use LDU 267 then convert — actually addresses are slices
+        // For simplicity: LDSLICE 267 bits
+        insts.push(...this.genExpr(expr.object, ctx));
+        insts.push({ op: "LDSLICE", bits: 267 });
+        ctx.stackDepth++;
+        insts.push({ op: "POP", i: 1 });
+        ctx.stackDepth--;
+        return insts;
+      }
+
+      default:
+        throw new Error(`Unknown method: ${expr.method}`);
     }
   }
 

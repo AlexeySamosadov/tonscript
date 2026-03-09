@@ -5,7 +5,7 @@
 import { readFileSync } from "fs";
 import { Lexer } from "./lexer.js";
 import { Parser } from "./parser.js";
-import { compile } from "./compiler.js";
+import { compile, compileAll } from "./compiler.js";
 import { methodId, messageOpcode, tvmToAsm } from "./tvm.js";
 
 let passed = 0;
@@ -981,6 +981,287 @@ test("BOC stateInit has code and data refs", async () => {
   // StateInit cell should have refs (code + data)
   assert(boc.stateInit.refs.length >= 2,
     `StateInit should have at least 2 refs (code + data), got ${boc.stateInit.refs.length}`);
+});
+
+// ── Sprint 5: Multi-contract support ────────────────────────
+console.log("\nSprint 5 - Multi-contract:");
+
+const multiContractSource = `
+  message Transfer { amount: uint32 }
+
+  contract TokenMaster {
+    totalSupply: uint64 = 0
+
+    receive(msg: Transfer) {
+      this.totalSupply += msg.amount
+    }
+
+    get supply(): uint64 {
+      return this.totalSupply
+    }
+  }
+
+  contract TokenWallet {
+    balance: uint64 = 0
+
+    receive(msg: Transfer) {
+      this.balance += msg.amount
+    }
+
+    get balance(): uint64 {
+      return this.balance
+    }
+  }
+`;
+
+test("parse file with 2 contracts", () => {
+  const ast = new Parser(multiContractSource).parse();
+  const contracts = ast.declarations.filter(d => d.kind === "ContractDecl");
+  assert(contracts.length === 2, `expected 2 contracts, got ${contracts.length}`);
+  assert(contracts[0].name === "TokenMaster", "first contract should be TokenMaster");
+  assert(contracts[1].name === "TokenWallet", "second contract should be TokenWallet");
+});
+
+test("compile each contract by name", () => {
+  const masterResult = compile(multiContractSource, "TokenMaster");
+  const walletResult = compile(multiContractSource, "TokenWallet");
+
+  assert(masterResult.asm.includes("Getter: supply"), "TokenMaster should have getter 'supply'");
+  assert(!masterResult.asm.includes("Getter: balance"), "TokenMaster should NOT have getter 'balance'");
+
+  assert(walletResult.asm.includes("Getter: balance"), "TokenWallet should have getter 'balance'");
+  assert(!walletResult.asm.includes("Getter: supply"), "TokenWallet should NOT have getter 'supply'");
+});
+
+test("compile without name selects first contract (backward compat)", () => {
+  const result = compile(multiContractSource);
+  assert(result.asm.includes("Getter: supply"),
+    "compile() without contractName should select first contract (TokenMaster with getter 'supply')");
+});
+
+test("compileAll returns map of all contracts", () => {
+  const results = compileAll(multiContractSource);
+  assert(results.size === 2, `compileAll should return 2 results, got ${results.size}`);
+  assert(results.has("TokenMaster"), "results should contain TokenMaster");
+  assert(results.has("TokenWallet"), "results should contain TokenWallet");
+
+  const master = results.get("TokenMaster")!;
+  const wallet = results.get("TokenWallet")!;
+  assert(master.asm.includes("Getter: supply"), "TokenMaster should have getter 'supply'");
+  assert(wallet.asm.includes("Getter: balance"), "TokenWallet should have getter 'balance'");
+});
+
+test("two contracts produce different code cells", () => {
+  const results = compileAll(multiContractSource);
+  const master = results.get("TokenMaster")!;
+  const wallet = results.get("TokenWallet")!;
+
+  // Both should have binary output
+  assert(master.binary !== undefined, "TokenMaster should have binary");
+  assert(wallet.binary !== undefined, "TokenWallet should have binary");
+
+  // The code cells should differ (different getters, different method_ids)
+  const masterBits = master.binary!.codeBits.join("");
+  const walletBits = wallet.binary!.codeBits.join("");
+  assert(masterBits !== walletBits,
+    "TokenMaster and TokenWallet should produce different code cells");
+});
+
+test("messages at top level are shared across contracts", () => {
+  // Both contracts receive the same Transfer message — both should compile
+  // and both should have recv_internal handlers that parse the Transfer opcode
+  const master = compile(multiContractSource, "TokenMaster");
+  const wallet = compile(multiContractSource, "TokenWallet");
+
+  assert(master.instructions.recvInternal.length > 0,
+    "TokenMaster should have recv_internal instructions (uses Transfer message)");
+  assert(wallet.instructions.recvInternal.length > 0,
+    "TokenWallet should have recv_internal instructions (uses Transfer message)");
+
+  // Both should reference the same opcode for Transfer
+  const masterAsm = tvmToAsm(master.instructions.recvInternal);
+  const walletAsm = tvmToAsm(wallet.instructions.recvInternal);
+  assert(masterAsm.includes("Handler: Transfer"), "TokenMaster should handle Transfer");
+  assert(walletAsm.includes("Handler: Transfer"), "TokenWallet should handle Transfer");
+});
+
+test("compile with unknown contract name throws", () => {
+  let threw = false;
+  try {
+    compile(multiContractSource, "NonExistent");
+  } catch (e: any) {
+    threw = true;
+    assert(e.message.includes("NonExistent"), "error should mention the missing contract name");
+  }
+  assert(threw, "compile with unknown contract name should throw");
+});
+
+// ── Sprint 6: Method calls & Cell/Builder/Slice API ─────────
+console.log("\nSprint 6 - Method calls & Cell/Builder/Slice API:");
+
+test("parse beginCell().storeUint(42, 32).endCell()", () => {
+  const ast = new Parser(`
+    contract C {
+      x: uint32 = 0
+      receive(msg: Cmd) {
+        let cell = beginCell().storeUint(42, 32).endCell()
+      }
+    }
+    message(1) Cmd {}
+  `).parse();
+  const contract = ast.declarations[0];
+  assert(contract.kind === "ContractDecl");
+  const letStmt = contract.receivers[0].body.stmts[0];
+  assert(letStmt.kind === "LetStmt", "should be LetStmt");
+  // The value should be a MethodCallExpr chain
+  const endCell = letStmt.value;
+  assert(endCell.kind === "MethodCallExpr", "outer should be MethodCallExpr");
+  assert(endCell.method === "endCell", "outer method should be endCell");
+  // The object of endCell should be the storeUint call
+  const storeUint = endCell.object;
+  assert(storeUint.kind === "MethodCallExpr", "inner should be MethodCallExpr");
+  assert(storeUint.method === "storeUint", "inner method should be storeUint");
+  assert(storeUint.args.length === 2, "storeUint should have 2 args");
+  // The object of storeUint should be the beginCell call
+  const beginCellExpr = storeUint.object;
+  assert(beginCellExpr.kind === "CallExpr", "innermost should be CallExpr");
+  assert(beginCellExpr.callee === "beginCell", "innermost callee should be beginCell");
+});
+
+test("parse cell.beginParse().loadUint(32)", () => {
+  const ast = new Parser(`
+    contract C {
+      x: uint32 = 0
+      receive(msg: Cmd) {
+        let val = cell.beginParse().loadUint(32)
+      }
+    }
+    message(1) Cmd {}
+  `).parse();
+  const contract = ast.declarations[0];
+  assert(contract.kind === "ContractDecl");
+  const letStmt = contract.receivers[0].body.stmts[0];
+  assert(letStmt.kind === "LetStmt");
+  const loadUint = letStmt.value;
+  assert(loadUint.kind === "MethodCallExpr", "should be MethodCallExpr");
+  assert(loadUint.method === "loadUint", "method should be loadUint");
+  const beginParse = loadUint.object;
+  assert(beginParse.kind === "MethodCallExpr", "inner should be MethodCallExpr");
+  assert(beginParse.method === "beginParse", "inner method should be beginParse");
+});
+
+test("compile beginCell().storeUint().endCell()", () => {
+  const result = compile(`
+    message(1) Cmd {}
+    contract C {
+      x: uint32 = 0
+      receive(msg: Cmd) {
+        let cell = beginCell().storeUint(42, 32).endCell()
+      }
+    }
+  `);
+  assert(result.asm.length > 0, "should compile");
+  assert(result.asm.includes("NEWC"), "should have NEWC for beginCell()");
+  assert(result.asm.includes("STU 32"), "should have STU 32 for storeUint(42, 32)");
+  assert(result.asm.includes("ENDC"), "should have ENDC for endCell()");
+});
+
+test("compile builder chaining with storeInt and storeCoins", () => {
+  const result = compile(`
+    message(1) Cmd {}
+    contract C {
+      x: uint32 = 0
+      receive(msg: Cmd) {
+        let cell = beginCell().storeUint(0x18, 6).storeInt(-1, 8).storeCoins(100).endCell()
+      }
+    }
+  `);
+  assert(result.asm.length > 0, "should compile");
+  assert(result.asm.includes("NEWC"), "should have NEWC");
+  assert(result.asm.includes("STU 6"), "should have STU 6");
+  assert(result.asm.includes("STI 8"), "should have STI 8");
+  assert(result.asm.includes("STVARUINT16"), "should have STVARUINT16 for storeCoins");
+  assert(result.asm.includes("ENDC"), "should have ENDC");
+});
+
+test("compile beginParse and loadUint", () => {
+  const result = compile(`
+    message(1) Cmd {}
+    contract C {
+      x: uint32 = 0
+      receive(msg: Cmd) {
+        let cell = beginCell().storeUint(42, 32).endCell()
+        let slice = cell.beginParse()
+        let val = slice.loadUint(32)
+        this.x = val
+      }
+    }
+  `);
+  assert(result.asm.length > 0, "should compile");
+  assert(result.asm.includes("CTOS"), "should have CTOS for beginParse()");
+  assert(result.asm.includes("LDU 32"), "should have LDU 32 for loadUint(32)");
+});
+
+test("compile storeRef", () => {
+  const result = compile(`
+    message(1) Cmd {}
+    contract C {
+      x: uint32 = 0
+      receive(msg: Cmd) {
+        let inner = beginCell().storeUint(1, 8).endCell()
+        let outer = beginCell().storeRef(inner).endCell()
+      }
+    }
+  `);
+  assert(result.asm.length > 0, "should compile");
+  assert(result.asm.includes("STREF"), "should have STREF for storeRef()");
+});
+
+test("compile cell hash", () => {
+  const result = compile(`
+    contract C {
+      x: uint256 = 0
+      get cellHash(): uint256 {
+        let cell = beginCell().storeUint(42, 32).endCell()
+        return cell.hash()
+      }
+    }
+  `);
+  assert(result.asm.length > 0, "should compile");
+  assert(result.asm.includes("HASHCU"), "should have HASHCU for hash()");
+});
+
+test("method call does not break existing MemberExpr", () => {
+  // Existing msg.amount access should still work
+  const result = compile(`
+    message(1) Transfer { amount: uint32 }
+    contract C {
+      balance: uint32 = 100
+      receive(msg: Transfer) {
+        this.balance += msg.amount
+      }
+      get balance(): uint32 { return this.balance }
+    }
+  `);
+  assert(result.asm.length > 0, "should compile");
+  assert(!result.asm.includes("s-1"), "should not have negative stack positions");
+});
+
+test("beginCell as expression in send (complex usage)", () => {
+  // Test that beginCell can be used inside other expressions
+  const result = compile(`
+    message(1) Cmd {}
+    contract C {
+      x: uint32 = 0
+      receive(msg: Cmd) {
+        let body = beginCell().storeUint(0, 32).endCell()
+      }
+    }
+  `);
+  assert(result.asm.length > 0, "should compile without errors");
+  assert(result.asm.includes("NEWC"), "should contain NEWC");
+  assert(result.asm.includes("STU 32"), "should contain STU 32");
+  assert(result.asm.includes("ENDC"), "should contain ENDC");
 });
 
 // ── Summary ────────────────────────────────────────────────

@@ -175,7 +175,8 @@ export type Expr =
   | BinaryExpr
   | UnaryExpr
   | CallExpr
-  | StructLitExpr;
+  | StructLitExpr
+  | MethodCallExpr;
 
 export type NumberLit = {
   kind: "NumberLit";
@@ -245,6 +246,14 @@ export type StructLitExpr = {
   kind: "StructLitExpr";
   name: string;
   fields: { name: string; value: Expr }[];
+  pos: Position;
+};
+
+export type MethodCallExpr = {
+  kind: "MethodCallExpr";
+  object: Expr;
+  method: string;
+  args: Expr[];
   pos: Position;
 };
 
