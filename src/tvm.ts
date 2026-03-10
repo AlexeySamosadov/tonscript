@@ -397,7 +397,7 @@ export class TVMAssembler {
         break;
       case "LDREF":   this.writeBits(0xD4, 8); break;
       case "ENDS":    this.writeBits(0xD1, 8); break;
-      case "LDVARUINT16": this.writeBits(0xFA01, 16); break;
+      case "LDVARUINT16": this.writeBits(0xFA00, 16); break;
       case "STVARUINT16": this.writeBits(0xFA02, 16); break;
 
       // Control flow

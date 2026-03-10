@@ -190,11 +190,6 @@ async function main() {
   });
 
   await test("JettonMaster: BurnNotification executes without error", async () => {
-    // NOTE: BurnNotification -= has a known codegen issue where the subtraction
-    // result is off by a constant offset for contracts with 2 storage fields
-    // and 4 message fields. The Coins-type -= works correctly in other handlers
-    // (see JettonWallet Transfer and Burn tests below). This is a codegen
-    // stack-position bug, not a contract logic error.
     const body = beginCell()
       .storeUint(burnNotificationOpcode, 32)
       .storeUint(1n, 64)
@@ -207,10 +202,7 @@ async function main() {
 
   await test("JettonMaster: totalSupply changed after BurnNotification", async () => {
     const val = await callGetter(masterAddr, totalSupplyId);
-    // Known codegen issue: expected 1300 but gets 1556 due to stack offset bug
-    // in handlers with 4+ msg fields and 2 storage fields.
-    // The important thing is the handler executes without TVM error.
-    assert(val !== 1500n, `expected totalSupply to change, but still ${val}`);
+    assert(val === 1300n, `expected 1300, got ${val}`);
   });
 
   // ── JettonWallet Tests ──────────────────────────────────────
