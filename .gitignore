@@ -1,4 +1,6 @@
 node_modules/
 dist/
 *.boc
+.env
 .testnet-deploy-results.json
+.jetton-deploy-results.json

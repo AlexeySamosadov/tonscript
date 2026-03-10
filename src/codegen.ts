@@ -815,6 +815,47 @@ export class CodeGenerator {
         return insts;
       }
 
+      case "computeStateInit": {
+        // computeStateInit(code, data) → Cell
+        // Builds a standard TON stateInit cell:
+        //   5-bit flags: split_depth(0) special(0) has_code(1) has_data(1) has_library(0) = 0b00110 = 6
+        //   Then: code cell ref, data cell ref
+        //
+        // Stack entry: code(s1) data(s0) after evaluating both args
+        // TVM sequence:
+        //   XCHG s1       → data(s1) code(s0)
+        //   NEWC          → data code builder       s0=builder, s1=code, s2=data
+        //   PUSHINT 6     → data code builder 6     s0=6, s1=builder, s2=code, s3=data
+        //   XCHG s1       → data code 6 builder     s0=builder, s1=6 — correct for STU
+        //   STU 5         → data code builder'      s0=builder', s1=code, s2=data
+        //   STREF         → data builder''           s0=builder'', s1=data (code ref stored)
+        //   STREF         → builder'''               s0=builder''' (data ref stored)
+        //   ENDC          → stateInit_cell
+        insts.push(...this.genExpr(expr.args[0], ctx)); // code cell
+        insts.push(...this.genExpr(expr.args[1], ctx)); // data cell
+        insts.push({ op: "XCHG", i: 1 });   // swap code and data
+        insts.push({ op: "NEWC" });
+        insts.push({ op: "PUSHINT", value: 6n }); // 0b00110: has_code=1, has_data=1
+        insts.push({ op: "XCHG", i: 1 });   // put builder on top for STU
+        insts.push({ op: "STU", bits: 5 }); // store 5-bit flags
+        insts.push({ op: "STREF" });        // store code ref (code at s1, builder at s0)
+        insts.push({ op: "STREF" });        // store data ref (data at s1, builder at s0)
+        insts.push({ op: "ENDC" });         // seal → stateInit cell
+        ctx.stackDepth--; // consumed 2 (code, data), produced 1 (cell) → net -1
+        return insts;
+      }
+
+      case "contractAddressHash": {
+        // contractAddressHash(stateInit) → uint256
+        // Computes the hash of a stateInit cell (the address hash part)
+        // Stack entry: stateInit(s0)
+        // HASHCU: cell → uint256 hash
+        insts.push(...this.genExpr(expr.args[0], ctx)); // stateInit cell
+        insts.push({ op: "HASHCU" });
+        // stackDepth unchanged: consumed 1, produced 1
+        return insts;
+      }
+
       default:
         throw new Error(`Unknown function: ${expr.callee}`);
     }
