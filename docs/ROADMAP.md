@@ -11,7 +11,7 @@
 - [x] Counter contract deployed on testnet
 - [x] 59 unit tests + 12 sandbox E2E tests
 
-### Sprint 5: Jetton Token
+### Sprint 5: Jetton Token (TEP-74)
 - [x] Multi-contract compilation (compile by name, compileAll)
 - [x] Cell/Builder/Slice API with method chaining
 - [x] Address computation (computeStateInit, contractAddressHash, HASHCU)
@@ -19,7 +19,41 @@
 - [x] Jetton deployed on testnet (Mint + InternalTransfer verified)
 - [x] 79 unit + 20 jetton sandbox = 99 tests
 
-### Bug Fixes (7 total)
+### Sprint 6: GitHub + README
+- [x] README.md with examples, architecture, comparison table
+- [x] LICENSE (MIT)
+- [x] GitHub repo (public)
+
+### Sprint 7: Wallet-to-Wallet Transfer
+- [x] JettonWallet Transfer + InternalTransfer flow
+- [x] Sandbox tests: mint → transfer A→B → verify balances
+- [x] Bidirectional transfers, edge cases, conservation checks
+- [x] 45 jetton sandbox tests total
+
+### Sprint 8: NFT Contract — Full TEP-62
+- [x] NftItem: access control, transfer, ownership_assigned notification, excess return, GetStaticData
+- [x] NftCollection: access control, deploy item tracking
+- [x] Compiler: sender() extraction from in_msg_cell, msgValue(), send() with body/addr_std
+- [x] Bugfix: SENDRAWMSG opcode 0xFB04 (was SETCODE!) → 0xFB00
+- [x] boc.ts: sub-dispatch for >3 getters (4-ref cell limit)
+- [x] 37 NFT sandbox tests, testnet deployed
+- [x] Gas: DeployNftItem 2,297 / TransferNft 5,826 (FunC level, below Tact)
+
+### Sprint 9: CLI Tool
+- [x] `tonscript build <file>` — compile to BOC (--contract, --output, --asm)
+- [x] `tonscript info <file>` — fields, messages, getters, opcodes, method IDs
+- [x] `tonscript test` — discover and run all test suites
+- [x] `tonscript deploy <file> --testnet` — compile + show address + explorer link
+- [x] `tonscript init [name]` — scaffold new project
+
+### Sprint 10: Map/Dict Type
+- [x] TVM opcodes: NEWDICT, STDICT, LDDICT, DICTUSET, DICTUGET, DICTUDEL, DICTISET, DICTIGET, DICTIDEL
+- [x] map.set(key, value) and map.delete(key) in codegen
+- [x] Map fields as cell refs in storage (LDDICT/STDICT)
+- [x] Registry example contract
+- [x] 28 registry sandbox tests
+
+### Bug Fixes (8 total)
 - [x] CRC16 init: 0xFFFF → 0
 - [x] PUSHINT long form: missing 5-bit length field
 - [x] THROW/THROWIF/THROWIFNOT: 16-bit → 13-bit prefix
@@ -27,150 +61,139 @@
 - [x] recv_internal: stack cleanup order
 - [x] LDVARUINT16: 0xFA01 → 0xFA00 (signed vs unsigned)
 - [x] PUSHCONT → PUSHREFCONT for large bodies
+- [x] SENDRAWMSG: 0xFB04 (SETCODE!) → 0xFB00
+
+### Stats
+- 12 commits, 202 tests (92 unit + 45 jetton + 37 NFT + 28 registry)
+- 4 example contracts: Counter, Jetton, NFT, Registry
+- 7 contracts deployed on testnet
 
 ---
 
-## Sprint 6: GitHub + README (Priority: HIGH)
+## Phase 2: Developer Tools (Priority: HIGH)
 
-Goal: Make project public and grant-ready.
+### Sprint 11: Gas Estimation
 
-- [ ] Write README.md with:
-  - Project description (TypeScript-like → TVM compiler)
-  - Quick start (install, compile, deploy)
-  - Syntax examples (counter, jetton)
-  - Architecture diagram
-  - Testnet deployment links
-  - Comparison with Tact/FunC
-- [ ] Add LICENSE (MIT)
-- [ ] Create GitHub repo (public)
-- [ ] Push all 6 commits
-- [ ] Add .github/workflows for CI (run tests on push)
+Goal: Know the cost of every operation before deploying.
 
-Estimated: 1 session
+- [ ] Gas cost table for all TVM opcodes (static lookup)
+- [ ] `tonscript gas <file>` CLI command
+- [ ] Per-handler gas breakdown: "receive(TransferNft) = 5,826 gas"
+- [ ] Per-opcode cost annotation in --asm output
+- [ ] Compare mode: show delta vs previous build
+- [ ] Warn on expensive operations (>10K gas)
 
----
+No existing TON tool does this. Developers currently deploy and pray.
 
-## Sprint 7: Wallet-to-Wallet Transfer (Priority: HIGH)
+### Sprint 12: Source-Mapped Errors
 
-Goal: Prove real Jetton transfer flow on-chain.
+Goal: Human-readable errors instead of "exit code 7".
 
-- [ ] JettonWallet Transfer handler: compute destination wallet address on-chain
-- [ ] Build and send InternalTransfer message to computed address
-- [ ] Transfer notification to destination owner
-- [ ] Excess TON return to response_destination
-- [ ] Sandbox test: mint to Wallet A → transfer from A to B → verify both balances
-- [ ] Testnet test: full transfer flow with 2 wallets
-- [ ] Bounce handling (failed transfers return tokens)
+- [ ] Source map: TVM instruction index → source file:line:col
+- [ ] Map AST positions through codegen pipeline
+- [ ] Sandbox error interceptor: catch exit codes → show source location
+- [ ] `tonscript test` shows: "Error at nft.ts:69 — require(sender() == this.ownerAddress) failed"
+- [ ] Known error codes: 401=unauthorized, 402=insufficient balance, etc.
+- [ ] Stack trace reconstruction from TVM vm_logs
 
-Dependencies: computeStateInit + contractAddressHash (done), send() enhancement (need full message envelope)
+### Sprint 13: Formal Verification (Lightweight)
 
-Estimated: 2 sessions
+Goal: Catch bugs before they cost money.
 
----
-
-## Sprint 8: NFT Contract — TEP-62 (Priority: MEDIUM)
-
-Goal: Show compiler handles multiple standards, not just Jetton.
-
-- [ ] NFT Item contract (TEP-62)
-  - Storage: index, collection_address, owner_address, content
-  - Transfer handler
-  - get_nft_data getter
-- [ ] NFT Collection contract
-  - Storage: next_item_index, content, owner
-  - Deploy item handler
-  - get_collection_data getter
-  - get_nft_address_by_index getter
-- [ ] Sandbox tests
-- [ ] Testnet deploy
-
-Dependencies: multi-contract (done), address computation (done)
-
-Estimated: 2 sessions
+- [ ] Invariant annotations: `@invariant balance >= 0`
+- [ ] Static analysis: detect unchecked sender(), unreachable code
+- [ ] Auto-check: Coins fields never go negative (require before subtract)
+- [ ] Auto-check: only owner patterns (sender() == this.owner before state change)
+- [ ] Report: "3 invariants verified, 1 warning: no access control on receive(Reset)"
 
 ---
 
-## Sprint 9: CLI Tool (Priority: MEDIUM)
+## Phase 3: Visualization & UX (Priority: MEDIUM)
 
-Goal: Developer-friendly command-line interface.
+### Sprint 14: Visual Contract Explorer
 
-- [ ] `tonscript build <file>` — compile to BOC
-- [ ] `tonscript build <file> --contract <name>` — compile specific contract
-- [ ] `tonscript test <file>` — run sandbox tests
-- [ ] `tonscript deploy <file> --testnet` — deploy to testnet
-- [ ] `tonscript deploy <file> --mainnet` — deploy to mainnet (with confirmation)
-- [ ] `tonscript init` — scaffold new project
-- [ ] npm publish as `tonscript` package
-- [ ] npx support: `npx tonscript build counter.ts`
+Goal: See your contracts, don't just read them.
 
-Dependencies: none (build on existing compile/deploy scripts)
+- [ ] Web UI: upload .ts → interactive visualization
+- [ ] Message flow graph: which contracts talk to which
+- [ ] Storage layout diagram: fields, sizes, bit positions
+- [ ] Handler flow: condition → action → send chains
+- [ ] Gas heatmap: color-code expensive operations
+- [ ] Shareable links for audit review
 
-Estimated: 1-2 sessions
+### Sprint 15: LSP + VS Code Extension
 
----
+Goal: IDE-grade developer experience.
 
-## Sprint 10: Map/Dict Type (Priority: MEDIUM)
-
-Goal: Enable complex contracts (DEX, governance, registries).
-
-- [ ] Parser: `map<K, V>` type (already parsed, needs codegen)
-- [ ] CodeGenerator:
-  - `map.set(key, value)` → DICTUSET / DICTISET
-  - `map.get(key)` → DICTUGET / DICTIGET
-  - `map.delete(key)` → DICTUDEL
-  - `map.has(key)` → DICTUGET + null check
-- [ ] Storage: serialize/deserialize dict as cell ref
-- [ ] TVMAssembler: NEWDICT, DICTUSET, DICTUGET, DICTISET, DICTIGET, DICTUDEL
-- [ ] Tests: set/get/delete/iterate
-- [ ] Example: simple registry contract
-
-Dependencies: Cell ref handling (done)
-
-Estimated: 2-3 sessions
+- [ ] Language Server Protocol implementation
+- [ ] Syntax highlighting for .ton / .ts contracts
+- [ ] Autocomplete: fields, methods, builtins
+- [ ] Inline error diagnostics
+- [ ] Hover: show gas cost, opcode, stack effect
+- [ ] Go-to-definition for fields and messages
 
 ---
 
-## Future (no timeline)
+## Phase 4: Language Completeness (Priority: MEDIUM)
 
-### Language Features
-- [ ] Import system (`import { Token } from "./token.ts"`)
-- [ ] Traits / interfaces (`trait Ownable { ... }`)
-- [ ] Generics (`contract Vault<T> { ... }`)
-- [ ] String type + TEP-64 on-chain metadata
+### Sprint 16: Missing Map Operations + Imports
+- [ ] map.get(key) → DICTUGET + conditional value parsing
+- [ ] map.has(key) → DICTUGET + flag only
+- [ ] Import system: `import { Token } from "./token.ts"`
+- [ ] Cross-file compilation
+
+### Sprint 17: Types & Patterns
 - [ ] Optional types (`Cell?`, `Address?`)
-- [ ] Enum types
-- [ ] Tuple return from getters
+- [ ] String type + TEP-64 on-chain metadata
 - [ ] Constants (`const FEE = toNano("0.05")`)
+- [ ] Enum types
+- [ ] Traits / interfaces (`trait Ownable { ... }`)
 
-### Developer Experience
-- [ ] LSP (Language Server Protocol) for VS Code
-- [ ] Syntax highlighting extension
-- [ ] Source maps for debugging
-- [ ] Gas estimation
-- [ ] Formal verification integration
-- [ ] Error messages with source positions
+---
+
+## Phase 5: Moonshot (Priority: LOW)
+
+### Cross-Chain Compilation
+- [ ] One .ts source → TVM (TON) + EVM (Ethereum) + WASM
+- [ ] Shared type system across targets
+- [ ] Cross-chain message bridges
+- [ ] "Write once, deploy everywhere"
 
 ### Ecosystem
-- [ ] TON Foundation grant application
 - [ ] Documentation site
-- [ ] Example contracts library (DEX, multisig, auction, etc.)
+- [ ] Example contracts library (DEX, multisig, auction, escrow)
+- [ ] npm publish as `tonscript` package
 - [ ] Integration with TON Connect
 - [ ] Mainnet deployment support
+- [ ] Community: Telegram group, tutorials
 
 ---
 
 ## Execution Order
 
 ```
-Sprint 6 (GitHub+README) ──→ Grant application
+Phase 1 (DONE)
+  Sprints 1-10: Core compiler, Jetton, NFT, CLI, Map
+  ↓
+Phase 2 (NEXT)
+  Sprint 11 (Gas estimation) ──→ Unique selling point
          │
-Sprint 7 (Wallet transfer) ──→ Full Jetton demo
+  Sprint 12 (Source maps) ──→ Developer trust
          │
-Sprint 8 (NFT) ──→ Multi-standard proof
+  Sprint 13 (Verification) ──→ Security story
+  ↓
+Phase 3
+  Sprint 14 (Visual explorer) ──→ Wow factor
          │
-Sprint 9 (CLI) ──→ Developer adoption
+  Sprint 15 (LSP/VS Code) ──→ Daily driver
+  ↓
+Phase 4
+  Sprint 16 (map.get + imports) ──→ Real projects
          │
-Sprint 10 (Map/Dict) ──→ Complex contracts
+  Sprint 17 (Types) ──→ Language maturity
+  ↓
+Phase 5
+  Cross-chain ──→ Moonshot
 ```
 
-Sprints 6-7 are the immediate priority: make the project visible and prove the full token transfer flow.
+Phase 2 is the immediate priority: make TonScript the best debugging and analysis tool for TON smart contracts.
