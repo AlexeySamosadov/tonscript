@@ -4,13 +4,16 @@
   "description": "TypeScript-like language that compiles directly to TVM bytecode",
   "type": "module",
   "bin": {
+    "tonscript": "./dist/cli.js",
     "tonsc": "./dist/cli.js"
   },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "tonsc": "node --loader ts-node/esm src/cli.ts",
-    "test": "node --loader ts-node/esm src/test.ts"
+    "tonscript": "npx tsx src/cli.ts",
+    "tonsc": "npx tsx src/cli.ts",
+    "test": "npx tsx src/cli.ts test",
+    "test:unit": "npx tsx src/test.ts"
   },
   "dependencies": {
     "@ton/core": "^0.63.1",
