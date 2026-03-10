@@ -464,12 +464,12 @@ export class TVMAssembler {
       case "NOW":       this.writeBits(0xF823, 16); break;
       case "MYADDR":    this.writeBits(0xF840, 16); break;
       case "BALANCE":   this.writeBits(0xF827, 16); break;
-      case "SENDRAWMSG": this.writeBits(0xFB04, 16); break;
+      case "SENDRAWMSG": this.writeBits(0xFB00, 16); break;
       case "RAWRESERVE": this.writeBits(0xFB02, 16); break;
       case "HASHCU":    this.writeBits(0xF900, 16); break;
       case "HASHSU":    this.writeBits(0xF901, 16); break;
       case "CHKSIGNU":  this.writeBits(0xF910, 16); break;
-      case "SETCODE":   this.writeBits(0xFB06, 16); break;
+      case "SETCODE":   this.writeBits(0xFB04, 16); break;
 
       // Global variables
       case "GETGLOB":

@@ -182,6 +182,30 @@ export class CodeGenerator {
       return insts;
     }
 
+    // Extract sender address from in_msg_cell and store in GLOB 1
+    // Stack: [msg_value bounce in_msg_cell in_msg_body]
+    //         s3        s2     s1           s0
+    insts.push({ op: "COMMENT", text: "Extract sender from in_msg_cell" });
+    insts.push({ op: "PUSH", i: 1 });     // copy in_msg_cell → s0
+    insts.push({ op: "CTOS" });            // cell → slice
+    // Message layout: int_msg_info$0 (1) + ihr_disabled (1) + bounce (1) + bounced (1) = 4 bits
+    // Then src addr: addr_std$10 (2) + anycast=0 (1) + workchain (8) + address (256)
+    // Skip 4 flag bits + 11 addr prefix bits = 15 bits, then read 256-bit hash
+    insts.push({ op: "LDU", bits: 4 });    // load 4-bit flags
+    insts.push({ op: "POP", i: 1 });       // drop flags, keep slice
+    insts.push({ op: "LDU", bits: 11 });   // load 11-bit addr prefix
+    insts.push({ op: "POP", i: 1 });       // drop prefix, keep slice
+    insts.push({ op: "LDU", bits: 256 });  // load 256-bit sender hash
+    insts.push({ op: "POP", i: 0 });       // drop remaining slice
+    // s0 = sender_hash
+    insts.push({ op: "SETGLOB", k: 1 });   // store sender hash in global 1
+
+    // Store msg_value in GLOB 2
+    // Stack is back to: [msg_value bounce in_msg_cell in_msg_body]
+    insts.push({ op: "COMMENT", text: "Store msg_value in GLOB 2" });
+    insts.push({ op: "PUSH", i: 3 });      // copy msg_value
+    insts.push({ op: "SETGLOB", k: 2 });   // store in global 2
+
     // Load op code from message body
     insts.push({ op: "COMMENT", text: "Parse op from in_msg_body" });
     // in_msg_body is at s0
@@ -752,11 +776,18 @@ export class CodeGenerator {
       }
 
       case "sender": {
-        // Load sender address from incoming message
-        // In TVM: parse in_msg_cell to get sender
-        // Simplified: we store sender in global 1
+        // Load sender address hash from global 1
+        // (set during recv_internal entry from in_msg_cell)
         ctx.stackDepth++;
         insts.push({ op: "GETGLOB", k: 1 });
+        return insts;
+      }
+
+      case "msgValue": {
+        // Load incoming message value from global 2
+        // (set during recv_internal entry from msg_value)
+        ctx.stackDepth++;
+        insts.push({ op: "GETGLOB", k: 2 });
         return insts;
       }
 
@@ -1027,22 +1058,44 @@ export class CodeGenerator {
   private genSendMessage(structLit: AST.StructLitExpr, ctx: CodegenContext): TVMInst[] {
     const insts: TVMInst[] = [];
     // Build internal message cell
-    // For prototype: build a simple internal message
     insts.push({ op: "COMMENT", text: "Build message cell" });
     insts.push({ op: "NEWC" });
     ctx.stackDepth++;
 
-    // Message flags: 0x18 = internal message, non-bounce
-    insts.push({ op: "PUSHINT", value: 0x18n });
+    // Message flags: 0x18 = bounce (default), 0x10 = no bounce
+    const bounceField = structLit.fields.find(f => f.name === "bounce");
+    let msgFlags = 0x18n; // default: bounce enabled
+    if (bounceField && bounceField.value.kind === "BoolLit" && !bounceField.value.value) {
+      msgFlags = 0x10n; // bounce disabled
+    }
+    insts.push({ op: "PUSHINT", value: msgFlags });
     ctx.stackDepth++;
+    insts.push({ op: "XCHG", i: 1 }); // swap flags and builder: builder(s0) flags(s1)
     insts.push({ op: "STU", bits: 6 });
     ctx.stackDepth--;
 
-    // Find 'to' field
+    // Destination address in addr_std format:
+    // addr_std$10 (2 bits) + anycast=0 (1 bit) + workchain=0 (8 bits) + hash (256 bits)
     const toField = structLit.fields.find(f => f.name === "to");
     if (toField) {
+      // Store 3-bit prefix: addr_std(10) + no_anycast(0) = 0b100 = 4
+      insts.push({ op: "PUSHINT", value: 4n });
+      ctx.stackDepth++;
+      insts.push({ op: "XCHG", i: 1 }); // swap prefix and builder
+      insts.push({ op: "STU", bits: 3 });
+      ctx.stackDepth--;
+
+      // Store 8-bit signed workchain (0)
+      insts.push({ op: "PUSHINT", value: 0n });
+      ctx.stackDepth++;
+      insts.push({ op: "XCHG", i: 1 }); // swap workchain and builder
+      insts.push({ op: "STI", bits: 8 });
+      ctx.stackDepth--;
+
+      // Store 256-bit address hash
       insts.push(...this.genExpr(toField.value, ctx));
-      insts.push({ op: "STSLICER" }); // store address as slice
+      insts.push({ op: "XCHG", i: 1 }); // swap hash and builder
+      insts.push({ op: "STU", bits: 256 });
       ctx.stackDepth--;
     }
 
@@ -1054,11 +1107,36 @@ export class CodeGenerator {
       ctx.stackDepth--;
     }
 
-    // Empty extra currencies, state init, etc.
-    insts.push({ op: "PUSHINT", value: 0n });
-    ctx.stackDepth++;
-    insts.push({ op: "STU", bits: 107 }); // ihr_disabled+bounce+bounced+src+created_lt+created_at etc.
-    ctx.stackDepth--;
+    // Message trailer and optional body
+    const bodyField = structLit.fields.find(f => f.name === "body");
+    if (bodyField) {
+      // Store 106 bits of zeros (extra currencies, state init, etc.)
+      insts.push({ op: "PUSHINT", value: 0n });
+      ctx.stackDepth++;
+      insts.push({ op: "XCHG", i: 1 });
+      insts.push({ op: "STU", bits: 106 });
+      ctx.stackDepth--;
+
+      // Store body-as-ref flag = 1 (1 bit)
+      insts.push({ op: "PUSHINT", value: 1n });
+      ctx.stackDepth++;
+      insts.push({ op: "XCHG", i: 1 });
+      insts.push({ op: "STU", bits: 1 });
+      ctx.stackDepth--;
+
+      // Store body cell as ref
+      insts.push(...this.genExpr(bodyField.value, ctx));
+      insts.push({ op: "XCHG", i: 1 }); // swap body cell and builder
+      insts.push({ op: "STREF" });
+      ctx.stackDepth--;
+    } else {
+      // No body — 107 bits of zeros (existing behavior)
+      insts.push({ op: "PUSHINT", value: 0n });
+      ctx.stackDepth++;
+      insts.push({ op: "XCHG", i: 1 });
+      insts.push({ op: "STU", bits: 107 });
+      ctx.stackDepth--;
+    }
 
     insts.push({ op: "ENDC" }); // builder → cell
     // cell is on stack

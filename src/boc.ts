@@ -101,7 +101,27 @@ function instsToCell(insts: TVMInst[]): Cell {
   return builder.endCell();
 }
 
-// Build the code cell with proper method dispatch
+// Generate getter dispatch instructions for a list of getters
+function genGetterDispatch(
+  getters: { name: string; id: number; code: TVMInst[] }[]
+): TVMInst[] {
+  const insts: TVMInst[] = [];
+  for (const getter of getters) {
+    insts.push({ op: "PUSH", i: 0 }); // DUP function_id
+    insts.push({ op: "PUSHINT", value: BigInt(getter.id) });
+    insts.push({ op: "EQUAL" });
+    const getterBody: TVMInst[] = [];
+    getterBody.push({ op: "POP", i: 0 }); // DROP function_id
+    getterBody.push(...getter.code);
+    insts.push({ op: "PUSHCONT", body: getterBody });
+    insts.push({ op: "IFJMP" });
+  }
+  return insts;
+}
+
+// Build the code cell with proper method dispatch.
+// When a contract has many getters (>3), the later getters are grouped
+// into a sub-dispatch continuation to stay within the 4-ref cell limit.
 function buildCodeCell(
   recvInternal: TVMInst[],
   getters: { name: string; id: number; code: TVMInst[] }[]
@@ -120,15 +140,34 @@ function buildCodeCell(
   fullInsts.push({ op: "PUSHCONT", body: recvBody });
   fullInsts.push({ op: "IFJMP" });
 
-  // Getter dispatch
-  for (const getter of getters) {
-    fullInsts.push({ op: "PUSH", i: 0 }); // DUP function_id
-    fullInsts.push({ op: "PUSHINT", value: BigInt(getter.id) });
-    fullInsts.push({ op: "EQUAL" });
-    const getterBody: TVMInst[] = [];
-    getterBody.push({ op: "POP", i: 0 }); // DROP function_id
-    getterBody.push(...getter.code);
-    fullInsts.push({ op: "PUSHCONT", body: getterBody });
+  // The recvInternal PUSHCONT uses 1 ref. We have 3 slots left for getters.
+  // Each getter with a large body uses 1 ref (PUSHREFCONT).
+  // If we have more than 3 getters, group the overflow into a sub-dispatch
+  // continuation so the top-level cell stays within 4 refs.
+  const MAX_INLINE_GETTERS = 3;
+
+  if (getters.length <= MAX_INLINE_GETTERS) {
+    // All getters fit in the top-level cell
+    fullInsts.push(...genGetterDispatch(getters));
+  } else {
+    // Put first (MAX_INLINE_GETTERS - 1) getters inline, wrap rest in sub-dispatch
+    const inlineGetters = getters.slice(0, MAX_INLINE_GETTERS - 1);
+    const overflowGetters = getters.slice(MAX_INLINE_GETTERS - 1);
+
+    fullInsts.push(...genGetterDispatch(inlineGetters));
+
+    // Wrap overflow getters in a PUSHCONT + EXECUTE (call) pattern
+    // The sub-dispatch body: check each getter, throw 11 if none match
+    const subBody: TVMInst[] = [];
+    subBody.push(...genGetterDispatch(overflowGetters));
+    subBody.push({ op: "THROW", n: 11 });
+
+    // Use PUSHCONT + IFJMP with always-true condition (PUSHINT -1)
+    // Actually simpler: just use PUSHCONT + IF where condition is always true
+    // But IF consumes the flag. Better: just inline as PUSHCONT body and jump.
+    // Simplest: PUSHINT -1 (true), PUSHCONT { sub-dispatch }, IFJMP
+    fullInsts.push({ op: "PUSHINT", value: -1n });
+    fullInsts.push({ op: "PUSHCONT", body: subBody });
     fullInsts.push({ op: "IFJMP" });
   }
 

@@ -4,3 +4,4 @@ dist/
 .env
 .testnet-deploy-results.json
 .jetton-deploy-results.json
+.nft-deploy-results.json
