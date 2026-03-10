@@ -84,12 +84,41 @@ export class CodeGenerator {
       case "BoolType": return 1;
       case "CoinsType": return 0; // VarUInt16, handled specially
       case "AddressType": return 267; // MsgAddressInt
+      case "MapType": return 0; // stored as ref via STDICT/LDDICT
       default: return 256; // fallback
     }
   }
 
   private isVarLength(type: AST.TypeExpr): boolean {
     return type.kind === "CoinsType";
+  }
+
+  private isMapType(type: AST.TypeExpr): boolean {
+    return type.kind === "MapType";
+  }
+
+  // Get the key bit-length for a map's key type
+  private mapKeyBits(mapType: AST.TypeExpr): number {
+    if (mapType.kind !== "MapType") throw new Error("Not a MapType");
+    return this.typeBits(mapType.keyType);
+  }
+
+  // Get the value bit-length for a map's value type
+  private mapValueBits(mapType: AST.TypeExpr): number {
+    if (mapType.kind !== "MapType") throw new Error("Not a MapType");
+    return this.typeBits(mapType.valueType);
+  }
+
+  // Whether the map uses signed integer keys
+  private mapKeyIsSigned(mapType: AST.TypeExpr): boolean {
+    if (mapType.kind !== "MapType") return false;
+    return mapType.keyType.kind === "IntType" && mapType.keyType.signed;
+  }
+
+  // Whether the map uses signed integer values
+  private mapValueIsSigned(mapType: AST.TypeExpr): boolean {
+    if (mapType.kind !== "MapType") return false;
+    return mapType.valueType.kind === "IntType" && mapType.valueType.signed;
   }
 
   // ── Load all storage fields from c4 ──────────────────────
@@ -101,7 +130,9 @@ export class CodeGenerator {
     insts.push({ op: "CTOS" });              // cell → slice
 
     for (const field of this.storageFields) {
-      if (this.isVarLength(field.type)) {
+      if (this.isMapType(field.type)) {
+        insts.push({ op: "LDDICT" }); // load dict from slice (handles Maybe ^Cell format)
+      } else if (this.isVarLength(field.type)) {
         insts.push({ op: "LDVARUINT16" }); // stack: [... remaining_slice value]
       } else {
         if (field.type.kind === "BoolType") {
@@ -145,7 +176,15 @@ export class CodeGenerator {
       insts.push({ op: "PUSH", i: stackIdx });
       // Swap with builder (which is now at s1 after the push)
 
-      if (this.isVarLength(field.type)) {
+      if (this.isMapType(field.type)) {
+        // STDICT: D b → b' (dict is value, builder is on stack below after PUSH)
+        // After PUSH: s0=dict, s1=builder
+        // STDICT expects: D(s0) b(s1) → b'(s0)
+        // But our stack after PUSH is: s0=dict, s1=builder — wrong order for STDICT
+        // STDICT takes: D b — so we need dict on top, builder below: XCHG then STDICT
+        insts.push({ op: "XCHG", i: 1 }); // swap dict and builder: s0=builder, s1=dict
+        insts.push({ op: "STDICT" });       // D b → b'
+      } else if (this.isVarLength(field.type)) {
         insts.push({ op: "STVARUINT16" });
       } else if (field.type.kind === "BoolType") {
         insts.push({ op: "STI", bits: 1 });
@@ -384,8 +423,23 @@ export class CodeGenerator {
   }
 
   private static VOID_BUILTINS = new Set(["require", "accept", "nativeReserve", "send"]);
+  private static MAP_VOID_METHODS = new Set(["set", "delete"]);
+
+  private isMapMethodCall(expr: AST.Expr): boolean {
+    if (expr.kind !== "MethodCallExpr") return false;
+    if (!CodeGenerator.MAP_VOID_METHODS.has(expr.method)) return false;
+    // Check if the object is a ThisFieldExpr pointing to a Map field
+    if (expr.object.kind !== "ThisFieldExpr") return false;
+    const field = this.storageFields.find(f => f.name === expr.object.field);
+    return field !== undefined && this.isMapType(field.type);
+  }
 
   private genExprStmt(stmt: AST.ExprStmt, ctx: CodegenContext): TVMInst[] {
+    // Map method calls (set, delete) are void — they modify storage directly
+    if (this.isMapMethodCall(stmt.expr)) {
+      return this.genMapMethodStmt(stmt.expr as AST.MethodCallExpr, ctx);
+    }
+
     const insts = this.genExpr(stmt.expr, ctx);
     // Drop result if expression produces a value
     const isVoidCall = stmt.expr.kind === "CallExpr" &&
@@ -395,6 +449,138 @@ export class CodeGenerator {
       ctx.stackDepth--;
     }
     return insts;
+  }
+
+  // ── Map method calls (set, delete) ─────────────────────
+  // These are special: they modify the dict on the stack in-place
+  // and don't produce a return value.
+
+  private genMapMethodStmt(expr: AST.MethodCallExpr, ctx: CodegenContext): TVMInst[] {
+    const insts: TVMInst[] = [];
+    const fieldExpr = expr.object as AST.ThisFieldExpr;
+    const fieldIdx = this.storageFields.findIndex(f => f.name === fieldExpr.field);
+    if (fieldIdx === -1) throw new Error(`Unknown field: ${fieldExpr.field}`);
+    const field = this.storageFields[fieldIdx];
+    const mapType = field.type;
+    if (mapType.kind !== "MapType") throw new Error(`Field ${field.name} is not a Map`);
+
+    const keyBits = this.mapKeyBits(mapType);
+    const valueBits = this.mapValueBits(mapType);
+    const keySigned = this.mapKeyIsSigned(mapType);
+    const valueSigned = this.mapValueIsSigned(mapType);
+
+    // Position of the dict field on the stack
+    const fieldStackPos = this.storageFields.length - 1 - fieldIdx;
+    const actualPos = fieldStackPos + (ctx.stackDepth - this.storageFields.length - ctx.baseOffset);
+
+    switch (expr.method) {
+      case "set": {
+        // this.entries.set(key, value)
+        // DICTUSET stack: x i D n → D'
+        // x = value as Slice, i = key, D = dict, n = key bits
+
+        insts.push({ op: "COMMENT", text: `Map.set on ${field.name}` });
+
+        // Step 1: Serialize value into a Slice
+        // Push value, NEWC, STU/STI (value is at s1, builder at s0), ENDC, CTOS
+        insts.push(...this.genExpr(expr.args[1], ctx)); // push value → s0=value
+        insts.push({ op: "NEWC" }); ctx.stackDepth++;   // s0=builder, s1=value
+        // STU/STI takes x(s1) b(s0) → b'(s0) — already in correct order
+        if (valueSigned) {
+          insts.push({ op: "STI", bits: valueBits });
+        } else {
+          insts.push({ op: "STU", bits: valueBits });
+        }
+        ctx.stackDepth--; // value consumed by STI/STU, builder' remains
+        insts.push({ op: "ENDC" }); // builder → cell
+        insts.push({ op: "CTOS" });  // cell → slice
+        // Net: stackDepth = before + 1 (the value_slice on top)
+
+        // Step 2: Push key
+        insts.push(...this.genExpr(expr.args[0], ctx)); // push key
+        // stackDepth += 1
+
+        // Step 3: Push dict from storage field
+        // actualPos needs recalculation because we've added items to stack
+        const dictPos1 = actualPos + 2; // +2 for value_slice and key on top
+        insts.push({ op: "PUSH", i: dictPos1 });
+        ctx.stackDepth++;
+
+        // Step 4: Push key bits
+        insts.push({ op: "PUSHINT", value: BigInt(keyBits) });
+        ctx.stackDepth++;
+
+        // Stack: ... value_slice key dict keyBits
+        // DICTUSET: x(s3) i(s2) D(s1) n(s0) → D'(s0)
+        // Wait, the stack ordering for DICTUSET is: x i D n (leftmost = deepest)
+        // TVM reads from top: s0=n, s1=D, s2=i, s3=x
+        // Our stack (top to bottom): keyBits(s0), dict(s1), key(s2), value_slice(s3)
+        // That matches: x=value_slice(s3), i=key(s2), D=dict(s1), n=keyBits(s0) ✓
+
+        if (keySigned) {
+          insts.push({ op: "DICTISET" });
+        } else {
+          insts.push({ op: "DICTUSET" });
+        }
+        ctx.stackDepth -= 3; // consumes x, i, D, n; produces D'
+        // stackDepth net change from start: +1(val_slice) +1(key) +1(dict) +1(keyBits) -3(DICTUSET) = +1
+        // D' is on top of stack now
+
+        // Step 5: Store D' back to the field position
+        const storePos = actualPos + 1; // +1 for D' on top
+        insts.push({ op: "POP", i: storePos });
+        ctx.stackDepth--;
+        // Net effect: stackDepth unchanged from start ✓
+
+        return insts;
+      }
+
+      case "delete": {
+        // this.entries.delete(key)
+        // DICTUDEL stack: i D n → D' ?
+        // We drop the flag (?)
+
+        insts.push({ op: "COMMENT", text: `Map.delete on ${field.name}` });
+
+        // Step 1: Push key
+        insts.push(...this.genExpr(expr.args[0], ctx));
+
+        // Step 2: Push dict from storage field
+        const dictPos2 = actualPos + 1; // +1 for key on top
+        insts.push({ op: "PUSH", i: dictPos2 });
+        ctx.stackDepth++;
+
+        // Step 3: Push key bits
+        insts.push({ op: "PUSHINT", value: BigInt(keyBits) });
+        ctx.stackDepth++;
+
+        // Stack (top): keyBits(s0), dict(s1), key(s2)
+        // DICTUDEL: i(s2) D(s1) n(s0) → D'(s1) ?(s0) — consumes 3, produces 2
+
+        if (keySigned) {
+          insts.push({ op: "DICTIDEL" });
+        } else {
+          insts.push({ op: "DICTUDEL" });
+        }
+        ctx.stackDepth -= 1; // consumes i, D, n (3); produces D', ? (2); net -1
+
+        // Drop the flag
+        insts.push({ op: "POP", i: 0 }); // drop ?
+        ctx.stackDepth--;
+        // D' is now on top; net change: +1(key) +1(dict) +1(keyBits) -1(DICTUDEL) -1(drop) = +1
+
+        // Store D' back to the field position
+        const storePos2 = actualPos + 1; // +1 for D' on top
+        insts.push({ op: "POP", i: storePos2 });
+        ctx.stackDepth--;
+        // Net: 0 ✓
+
+        return insts;
+      }
+
+      default:
+        throw new Error(`Unknown Map method: ${expr.method}`);
+    }
   }
 
   private genAssignStmt(stmt: AST.AssignStmt, ctx: CodegenContext): TVMInst[] {
@@ -1213,14 +1399,18 @@ export class CodeGenerator {
 
       // Push default values for all fields onto the stack
       for (const field of this.storageFields) {
-        const defaultVal = this.contract.fields.find(f => f.name === field.name)?.defaultValue;
-        let value = 0n;
-        if (defaultVal?.kind === "NumberLit") {
-          value = defaultVal.value;
-        } else if (defaultVal?.kind === "BoolLit") {
-          value = defaultVal.value ? -1n : 0n;
+        if (this.isMapType(field.type)) {
+          insts.push({ op: "NEWDICT" }); // empty dict (null)
+        } else {
+          const defaultVal = this.contract.fields.find(f => f.name === field.name)?.defaultValue;
+          let value = 0n;
+          if (defaultVal?.kind === "NumberLit") {
+            value = defaultVal.value;
+          } else if (defaultVal?.kind === "BoolLit") {
+            value = defaultVal.value ? -1n : 0n;
+          }
+          insts.push({ op: "PUSHINT", value });
         }
-        insts.push({ op: "PUSHINT", value });
       }
       // Stack: [param_N-1, ..., param_0, field_0, field_1, ..., field_N-1]
       // (params are below, pushed by caller)
@@ -1266,7 +1456,10 @@ export class CodeGenerator {
         const stackIdx = this.storageFields.length - i;
         insts.push({ op: "PUSH", i: stackIdx });
 
-        if (this.isVarLength(field.type)) {
+        if (this.isMapType(field.type)) {
+          insts.push({ op: "XCHG", i: 1 });
+          insts.push({ op: "STDICT" });
+        } else if (this.isVarLength(field.type)) {
           insts.push({ op: "STVARUINT16" });
         } else if (field.type.kind === "BoolType") {
           insts.push({ op: "STI", bits: 1 });
@@ -1298,17 +1491,24 @@ export class CodeGenerator {
           value = defaultVal.value ? -1n : 0n;
         }
 
-        insts.push({ op: "PUSHINT", value });
-        if (this.isVarLength(field.type)) {
-          insts.push({ op: "STVARUINT16" });
-        } else if (field.type.kind === "BoolType") {
-          insts.push({ op: "STI", bits: 1 });
-        } else if (field.type.kind === "IntType" && field.type.signed) {
+        if (this.isMapType(field.type)) {
+          // Empty dict → NEWDICT pushes null, STDICT stores it
+          insts.push({ op: "NEWDICT" });
           insts.push({ op: "XCHG", i: 1 });
-          insts.push({ op: "STI", bits: field.bits });
+          insts.push({ op: "STDICT" });
         } else {
-          insts.push({ op: "XCHG", i: 1 });
-          insts.push({ op: "STU", bits: field.bits });
+          insts.push({ op: "PUSHINT", value });
+          if (this.isVarLength(field.type)) {
+            insts.push({ op: "STVARUINT16" });
+          } else if (field.type.kind === "BoolType") {
+            insts.push({ op: "STI", bits: 1 });
+          } else if (field.type.kind === "IntType" && field.type.signed) {
+            insts.push({ op: "XCHG", i: 1 });
+            insts.push({ op: "STI", bits: field.bits });
+          } else {
+            insts.push({ op: "XCHG", i: 1 });
+            insts.push({ op: "STU", bits: field.bits });
+          }
         }
       }
 

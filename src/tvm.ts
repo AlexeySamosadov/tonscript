@@ -95,6 +95,16 @@ export type TVMInst =
   | { op: "ROLLREV"; n: number }
   | { op: "ROLL"; n: number }
   | { op: "SWAP2" }                                // XCHG s0,s2
+  // Dict operations
+  | { op: "NEWDICT" }                               // Push empty dict (null) — 0x6D
+  | { op: "STDICT" }                                // D b → b' — store dict to builder — 0xF400
+  | { op: "LDDICT" }                                // s → D s' — load dict from slice — 0xF404
+  | { op: "DICTUSET" }                              // x i D n → D' — set (uint key) — 0xF416
+  | { op: "DICTUGET" }                              // i D n → x -1 or 0 — get (uint key) — 0xF40E
+  | { op: "DICTUDEL" }                              // i D n → D' ? — delete (uint key) — 0xF45B
+  | { op: "DICTISET" }                              // x i D n → D' — set (int key) — 0xF414
+  | { op: "DICTIGET" }                              // i D n → x -1 or 0 — get (int key) — 0xF40C
+  | { op: "DICTIDEL" }                              // i D n → D' ? — delete (int key) — 0xF45A
   | { op: "COMMENT"; text: string };               // Not a real opcode, for asm output
 
 // ── Pretty-printer: instructions → readable assembly ───────
@@ -215,6 +225,19 @@ export function tvmToAsm(insts: TVMInst[], indent = 0): string {
       case "ROLLREV":
         lines.push(`${pad}ROLLREV ${inst.n}`);
         break;
+      // Dict operations
+      case "NEWDICT":
+      case "STDICT":
+      case "LDDICT":
+      case "DICTUSET":
+      case "DICTUGET":
+      case "DICTUDEL":
+      case "DICTISET":
+      case "DICTIGET":
+      case "DICTIDEL":
+        lines.push(`${pad}${inst.op}`);
+        break;
+
       default:
         lines.push(`${pad}${inst.op}`);
     }
@@ -503,6 +526,17 @@ export class TVMAssembler {
       case "WHILEEND":  this.writeBits(0xE9, 8); break;
       case "REPEAT":    this.writeBits(0xE4, 8); break;
       case "REPEATEND": this.writeBits(0xE5, 8); break;
+
+      // Dict operations
+      case "NEWDICT":   this.writeBits(0x6D, 8); break;    // alias for NULL
+      case "STDICT":    this.writeBits(0xF400, 16); break;
+      case "LDDICT":    this.writeBits(0xF404, 16); break;
+      case "DICTIGET":  this.writeBits(0xF40C, 16); break;
+      case "DICTUGET":  this.writeBits(0xF40E, 16); break;
+      case "DICTISET":  this.writeBits(0xF414, 16); break;
+      case "DICTUSET":  this.writeBits(0xF416, 16); break;
+      case "DICTIDEL":  this.writeBits(0xF45A, 16); break;
+      case "DICTUDEL":  this.writeBits(0xF45B, 16); break;
     }
   }
 

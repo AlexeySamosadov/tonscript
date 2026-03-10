@@ -190,7 +190,10 @@ function buildDataCell(fields: { name: string; type: any; defaultValue?: any }[]
     }
 
     const type = field.type;
-    if (type.kind === "CoinsType") {
+    if (type.kind === "MapType") {
+      // Empty dict = Maybe ^Cell with nothing (just 0 bit)
+      builder.storeBit(0);
+    } else if (type.kind === "CoinsType") {
       builder.storeCoins(value);
     } else if (type.kind === "BoolType") {
       builder.storeBit(value !== 0n);

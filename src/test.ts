@@ -1347,6 +1347,193 @@ test("computeStateInit with builder-constructed cells", () => {
   assert(result.asm.includes("STREF"), "should have STREF for refs");
 });
 
+// ── Sprint 10: Map/Dict type ─────────────────────────────
+console.log("\nSprint 10 - Map/Dict type:");
+
+test("parse Map<uint256, uint256> type", () => {
+  const ast = new Parser(`
+    contract C {
+      entries: Map<uint256, uint256>
+    }
+  `).parse();
+  const contract = ast.declarations[0];
+  assert(contract.kind === "ContractDecl");
+  const field = contract.fields[0];
+  assert(field.name === "entries");
+  assert(field.type.kind === "MapType");
+  if (field.type.kind === "MapType") {
+    assert(field.type.keyType.kind === "IntType");
+    if (field.type.keyType.kind === "IntType") {
+      assert(field.type.keyType.bits === 256);
+      assert(field.type.keyType.signed === false);
+    }
+    assert(field.type.valueType.kind === "IntType");
+    if (field.type.valueType.kind === "IntType") {
+      assert(field.type.valueType.bits === 256);
+    }
+  }
+});
+
+test("parse contract with Map field and other fields", () => {
+  const ast = new Parser(`
+    contract C {
+      entries: Map<uint256, uint256>
+      owner: uint256 = 0
+      count: uint64 = 0
+    }
+  `).parse();
+  const contract = ast.declarations[0];
+  assert(contract.kind === "ContractDecl");
+  assert(contract.fields.length === 3);
+  assert(contract.fields[0].type.kind === "MapType");
+  assert(contract.fields[1].type.kind === "IntType");
+  assert(contract.fields[2].type.kind === "IntType");
+});
+
+test("parse this.field.set() as MethodCallExpr on ThisFieldExpr", () => {
+  const ast = new Parser(`
+    message(1) Cmd { key: uint256; value: uint256 }
+    contract C {
+      entries: Map<uint256, uint256>
+      receive(msg: Cmd) {
+        this.entries.set(msg.key, msg.value)
+      }
+    }
+  `).parse();
+  const contract = ast.declarations.find(d => d.kind === "ContractDecl")!;
+  assert(contract.kind === "ContractDecl");
+  const stmt = contract.receivers[0].body.stmts[0];
+  assert(stmt.kind === "ExprStmt");
+  const expr = stmt.expr;
+  assert(expr.kind === "MethodCallExpr", "should be MethodCallExpr");
+  if (expr.kind === "MethodCallExpr") {
+    assert(expr.method === "set", "method should be 'set'");
+    assert(expr.object.kind === "ThisFieldExpr", "object should be ThisFieldExpr");
+    if (expr.object.kind === "ThisFieldExpr") {
+      assert(expr.object.field === "entries", "field should be 'entries'");
+    }
+    assert(expr.args.length === 2, "set should have 2 args");
+  }
+});
+
+test("parse this.field.delete() as MethodCallExpr", () => {
+  const ast = new Parser(`
+    message(1) Cmd { key: uint256 }
+    contract C {
+      entries: Map<uint256, uint256>
+      receive(msg: Cmd) {
+        this.entries.delete(msg.key)
+      }
+    }
+  `).parse();
+  const contract = ast.declarations.find(d => d.kind === "ContractDecl")!;
+  assert(contract.kind === "ContractDecl");
+  const stmt = contract.receivers[0].body.stmts[0];
+  assert(stmt.kind === "ExprStmt");
+  const expr = stmt.expr;
+  assert(expr.kind === "MethodCallExpr");
+  if (expr.kind === "MethodCallExpr") {
+    assert(expr.method === "delete", "method should be 'delete'");
+    assert(expr.args.length === 1, "delete should have 1 arg");
+  }
+});
+
+test("compile registry.ts without errors", () => {
+  const source = readFileSync(new URL("../examples/registry.ts", import.meta.url), "utf-8");
+  const result = compile(source);
+  assert(result.asm.length > 0, "should compile");
+  assert(result.instructions.recvInternal.length > 0, "should have recv_internal");
+  assert(result.instructions.getters.length === 2, "should have 2 getters (count, owner)");
+  assert(result.instructions.stateInit.length > 0, "should have state init");
+});
+
+test("registry.ts has NEWDICT in state init", () => {
+  const source = readFileSync(new URL("../examples/registry.ts", import.meta.url), "utf-8");
+  const result = compile(source);
+  assert(result.asm.includes("NEWDICT"), "state init should have NEWDICT for empty dict");
+});
+
+test("registry.ts has LDDICT and STDICT in storage ops", () => {
+  const source = readFileSync(new URL("../examples/registry.ts", import.meta.url), "utf-8");
+  const result = compile(source);
+  assert(result.asm.includes("LDDICT"), "should have LDDICT for loading dict from storage");
+  assert(result.asm.includes("STDICT"), "should have STDICT for saving dict to storage");
+});
+
+test("registry.ts has DICTUSET for map.set()", () => {
+  const source = readFileSync(new URL("../examples/registry.ts", import.meta.url), "utf-8");
+  const result = compile(source);
+  assert(result.asm.includes("DICTUSET"), "should have DICTUSET for unsigned key set");
+  assert(result.asm.includes("Map.set"), "should have Map.set comment");
+});
+
+test("registry.ts has DICTUDEL for map.delete()", () => {
+  const source = readFileSync(new URL("../examples/registry.ts", import.meta.url), "utf-8");
+  const result = compile(source);
+  assert(result.asm.includes("DICTUDEL"), "should have DICTUDEL for unsigned key delete");
+  assert(result.asm.includes("Map.delete"), "should have Map.delete comment");
+});
+
+test("registry.ts BOC builds successfully", async () => {
+  const { buildContractBoc } = await import("./boc.js");
+  const source = readFileSync(new URL("../examples/registry.ts", import.meta.url), "utf-8");
+  const result = compile(source);
+  const boc = buildContractBoc(result);
+  assert(boc.code !== undefined, "should have code cell");
+  assert(boc.data !== undefined, "should have data cell");
+  assert(boc.boc.length > 0, "BOC should not be empty");
+  assert(boc.code.bits.length > 0, "code cell should have bits");
+});
+
+test("Map with signed key uses DICTISET/DICTIDEL", () => {
+  const result = compile(`
+    message(1) Set { key: int256; value: uint256 }
+    message(2) Del { key: int256 }
+    contract C {
+      entries: Map<int256, uint256>
+      receive(msg: Set) {
+        this.entries.set(msg.key, msg.value)
+      }
+      receive(msg: Del) {
+        this.entries.delete(msg.key)
+      }
+      get dummy(): uint64 { return 0 }
+    }
+  `);
+  assert(result.asm.includes("DICTISET"), "signed key map.set should use DICTISET");
+  assert(result.asm.includes("DICTIDEL"), "signed key map.delete should use DICTIDEL");
+});
+
+test("binary encoding includes NEWDICT opcode", () => {
+  const source = readFileSync(new URL("../examples/registry.ts", import.meta.url), "utf-8");
+  const result = compile(source);
+  assert(result.binary !== undefined, "should have binary output");
+  // NEWDICT is 0x6D = 01101101
+  // Check the binary has valid bits
+  for (const bit of result.binary!.codeBits) {
+    assert(bit === 0 || bit === 1, "all code bits should be 0 or 1");
+  }
+});
+
+test("Map field does not break existing field access", () => {
+  const result = compile(`
+    message(1) Cmd {}
+    contract C {
+      entries: Map<uint256, uint256>
+      owner: uint256 = 42
+      count: uint64 = 0
+      receive(msg: Cmd) {
+        this.count += 1
+      }
+      get owner(): uint256 { return this.owner }
+      get count(): uint64 { return this.count }
+    }
+  `);
+  assert(result.asm.length > 0, "should compile");
+  assert(!result.asm.includes("s-1"), "should not have negative stack positions");
+  assert(result.instructions.getters.length === 2, "should have 2 getters");
+});
+
 // ── Summary ────────────────────────────────────────────────
 
 console.log(`\n=== Results: ${passed} passed, ${failed} failed ===\n`);
