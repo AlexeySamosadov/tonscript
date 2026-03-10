@@ -1264,6 +1264,89 @@ test("beginCell as expression in send (complex usage)", () => {
   assert(result.asm.includes("ENDC"), "should contain ENDC");
 });
 
+// ── Sprint 7: Address computation (stateInit hashing) ───────
+console.log("\nSprint 7 - Address computation:");
+
+test("computeStateInit generates correct instructions", () => {
+  const result = compile(`
+    message(1) Cmd {}
+    contract C {
+      x: uint32 = 0
+      receive(msg: Cmd) {
+        let code = emptyCell()
+        let data = emptyCell()
+        let si = computeStateInit(code, data)
+      }
+      get x(): uint32 { return this.x }
+    }
+  `);
+  assert(result.asm.includes("NEWC"), "should have NEWC for builder");
+  assert(result.asm.includes("PUSHINT 6"), "should have PUSHINT 6 for stateInit flags (0b00110)");
+  assert(result.asm.includes("STU 5"), "should have STU 5 for 5-bit flags");
+  assert(result.asm.includes("STREF"), "should have STREF for storing code/data refs");
+  assert(result.asm.includes("ENDC"), "should have ENDC to seal the cell");
+});
+
+test("contractAddressHash generates HASHCU", () => {
+  const result = compile(`
+    message(1) Cmd {}
+    contract C {
+      x: uint32 = 0
+      receive(msg: Cmd) {
+        let si = computeStateInit(emptyCell(), emptyCell())
+        let h = contractAddressHash(si)
+      }
+      get x(): uint32 { return this.x }
+    }
+  `);
+  assert(result.asm.includes("HASHCU"), "should have HASHCU for contractAddressHash");
+});
+
+test("computeStateInit + contractAddressHash integration", () => {
+  // Full pipeline: build stateInit from empty cells, compute address hash
+  const result = compile(`
+    message(1) Init {}
+    contract Wallet {
+      owner: uint256 = 0
+      receive(msg: Init) {
+        let code = emptyCell()
+        let data = emptyCell()
+        let si = computeStateInit(code, data)
+        let addrHash = contractAddressHash(si)
+      }
+      get owner(): uint256 { return this.owner }
+    }
+  `);
+  assert(result.asm.length > 0, "should compile");
+  // Verify the instruction sequence includes all expected opcodes
+  const asm = result.asm;
+  assert(asm.includes("NEWC"), "should have NEWC");
+  assert(asm.includes("ENDC"), "should have ENDC");
+  assert(asm.includes("STREF"), "should have STREF");
+  assert(asm.includes("HASHCU"), "should have HASHCU");
+  assert(asm.includes("STU 5"), "should have STU 5 for flags");
+  assert(asm.includes("PUSHINT 6"), "should have PUSHINT 6 for flags value");
+});
+
+test("computeStateInit with builder-constructed cells", () => {
+  // Use beginCell to build code/data cells, then computeStateInit
+  const result = compile(`
+    message(1) Cmd {}
+    contract C {
+      x: uint32 = 0
+      receive(msg: Cmd) {
+        let code = beginCell().storeUint(0, 32).endCell()
+        let data = beginCell().storeUint(1, 32).endCell()
+        let si = computeStateInit(code, data)
+      }
+      get x(): uint32 { return this.x }
+    }
+  `);
+  assert(result.asm.length > 0, "should compile with builder-constructed cells");
+  assert(result.asm.includes("STU 5"), "should have STU 5 for stateInit flags");
+  assert(result.asm.includes("STREF"), "should have STREF for refs");
+});
+
 // ── Summary ────────────────────────────────────────────────
 
 console.log(`\n=== Results: ${passed} passed, ${failed} failed ===\n`);
